@@ -8,5 +8,6 @@ require (
 	github.com/decred/dcrd/dcrutil/v3 v3.0.0
 	github.com/decred/dcrd/rpc/jsonrpc/types/v2 v2.3.0
 	github.com/decred/go-socks v1.1.0
-	github.com/jessevdk/go-flags v1.4.1-0.20200711081900-c17162fe8fd7
+	github.com/jrick/flagfile v0.0.0-20200516155228-eacdea149b40
+	github.com/jrick/wsrpc/v2 v2.3.5-0.20200813153729-67d234ea987d
 )

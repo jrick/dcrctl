@@ -7,18 +7,19 @@ package main
 
 import (
 	"bufio"
-	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
-	"path/filepath"
 	"strings"
 
 	wallettypes "decred.org/dcrwallet/rpc/jsonrpc/types"
 	"github.com/decred/dcrd/dcrjson/v3"
 	dcrdtypes "github.com/decred/dcrd/rpc/jsonrpc/types/v2"
+	"github.com/jrick/wsrpc/v2/agent"
 )
 
 const (
@@ -40,20 +41,6 @@ func commandUsage(method interface{}) {
 	fmt.Fprintf(os.Stderr, "  %s\n", usage)
 }
 
-// usage displays the general usage when the help flag is not displayed and
-// and an invalid command was specified.  The commandUsage function is used
-// instead when a valid command was specified.
-func usage(errorMessage string) {
-	appName := filepath.Base(os.Args[0])
-	appName = strings.TrimSuffix(appName, filepath.Ext(appName))
-	fmt.Fprintln(os.Stderr, errorMessage)
-	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintf(os.Stderr, "  %s [OPTIONS] <command> <args...>\n\n",
-		appName)
-	fmt.Fprintln(os.Stderr, showHelpMessage)
-	fmt.Fprintln(os.Stderr, listCmdMessage)
-}
-
 func main() {
 	cfg, args, err := loadConfig()
 	if err != nil {
@@ -61,8 +48,8 @@ func main() {
 	}
 
 	if len(args) < 1 {
-		usage("No command specified")
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, "missing command parameter")
+		usage()
 	}
 
 	// Ensure the specified method identifies a valid registered command and
@@ -80,9 +67,7 @@ func main() {
 		os.Exit(1)
 	}
 	if usageFlags&unusableFlags != 0 {
-		fmt.Fprintf(os.Stderr, "The '%s' command can only be used via "+
-			"websockets\n", method)
-		fmt.Fprintln(os.Stderr, listCmdMessage)
+		fmt.Fprintf(os.Stderr, "The '%s' command is unusable\n", method)
 		os.Exit(1)
 	}
 
@@ -116,6 +101,12 @@ func main() {
 		params = append(params, arg)
 	}
 
+	// The only way to use dcrjson's argument parsing features is to create
+	// the concrete command type boxed in an interface{}, and then marshal
+	// this to a complete JSON-RPC request object.  So we do this, and then
+	// immediately unmarsal the parameters contained within so they can be
+	// passed to a far saner Call method.
+
 	// Attempt to create the appropriate command using the arguments
 	// provided by the user.
 	cmd, err := dcrjson.NewCmd(method, params...)
@@ -148,25 +139,63 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Send the JSON-RPC request to the server using the user-specified
-	// connection configuration.
-	result, err := sendPostRequest(marshalledJSON, cfg)
+	// Now the parameters are actually available.
+	var requestObject struct {
+		Params []json.RawMessage `json:"params"`
+	}
+	err = json.Unmarshal(marshalledJSON, &requestObject)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	callParams := make([]interface{}, len(requestObject.Params))
+	for i := range callParams {
+		callParams[i] = requestObject.Params[i]
+	}
+
+	// Caller is the client to perform the call.  This is either a newly
+	// dialed wsrpc.Client, or (later) a connection to the agent process.
+	var caller interface {
+		Call(ctx context.Context, method string, result interface{}, args ...interface{}) error
+	}
+
+	ctx := context.Background()
+	var result json.RawMessage
+	// proxy isn't supported by the agent
+	if cfg.Proxy == "" && agent.EnvironmentSet() {
+		ag := &agent.Client{
+			Address: cfg.RPCServer,
+			User:    cfg.RPCUser,
+			Pass:    cfg.RPCPassword,
+		}
+		if cfg.RPCCert != "" {
+			pem, err := ioutil.ReadFile(cfg.RPCCert)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			ag.RootCert = string(pem)
+		}
+		caller = ag
+	} else {
+		caller, err = dialClient(ctx, cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	err = caller.Call(ctx, methodStr, &result, callParams...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
+	if len(result) == 0 {
+		return
+	}
+
 	// Choose how to display the result based on its type.
-	strResult := string(result)
-	if strings.HasPrefix(strResult, "{") || strings.HasPrefix(strResult, "[") {
-		var dst bytes.Buffer
-		if err := json.Indent(&dst, result, "", "  "); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to format result: %v",
-				err)
-			os.Exit(1)
-		}
-		fmt.Println(dst.String())
-	} else if strings.HasPrefix(strResult, `"`) {
+	if result[0] == '"' {
 		var str string
 		if err := json.Unmarshal(result, &str); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to unmarshal result: %v",
@@ -174,7 +203,20 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(str)
-	} else if strResult != "null" {
-		fmt.Println(strResult)
+		return
 	}
+
+	if result[0] == '{' || result[0] == '[' {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		err := enc.Encode(result)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to format result: %v",
+				err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Printf("%s\n", result)
 }

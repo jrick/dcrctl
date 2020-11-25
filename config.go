@@ -6,24 +6,22 @@
 package main
 
 import (
-	"errors"
+	"flag"
 	"fmt"
-	"io/ioutil"
 	"net"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
 	"github.com/decred/dcrd/dcrjson/v3"
 	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/jrick/flagfile"
 
 	wallettypes "decred.org/dcrwallet/rpc/jsonrpc/types"
 	dcrdtypes "github.com/decred/dcrd/rpc/jsonrpc/types/v2"
-
-	flags "github.com/jessevdk/go-flags"
 )
 
 const (
@@ -115,59 +113,88 @@ func listCommands() {
 //
 // See loadConfig for details on the configuration load process.
 type config struct {
-	ShowVersion     bool   `short:"V" long:"version" description:"Display version information and exit"`
-	ListCommands    bool   `short:"l" long:"listcommands" description:"List all of the supported commands and exit"`
-	ConfigFile      string `short:"C" long:"configfile" description:"Path to configuration file"`
-	RPCUser         string `short:"u" long:"rpcuser" description:"RPC username"`
-	RPCPassword     string `short:"P" long:"rpcpass" default-mask:"-" description:"RPC password"`
-	RPCServer       string `short:"s" long:"rpcserver" description:"RPC server to connect to"`
-	WalletRPCServer string `short:"w" long:"walletrpcserver" description:"Wallet RPC server to connect to"`
-	RPCCert         string `short:"c" long:"rpccert" description:"RPC server certificate chain for validation"`
-	PrintJSON       bool   `short:"j" long:"json" description:"Print json messages sent and received"`
-	NoTLS           bool   `long:"notls" description:"Disable TLS"`
-	Proxy           string `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
-	ProxyUser       string `long:"proxyuser" description:"Username for proxy server"`
-	ProxyPass       string `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
-	TestNet         bool   `long:"testnet" description:"Connect to testnet"`
-	SimNet          bool   `long:"simnet" description:"Connect to the simulation test network"`
-	TLSSkipVerify   bool   `long:"skipverify" description:"Do not verify tls certificates (not recommended!)"`
-	Wallet          bool   `long:"wallet" description:"Connect to wallet"`
-
-	AuthType   string `long:"authtype" description:"The authorization type in use by the target server" choice:"basic" choice:"clientcert" default:"basic"`
-	ClientCert string `long:"clientcert" description:"Path to TLS certificate for client authentication"`
-	ClientKey  string `long:"clientkey" description:"Path to TLS client authentication key"`
+	Config       flag.Value
+	ShowVersion  bool
+	ListCommands bool
+	RPCServer    string
+	Wallet       bool
+	TestNet      bool
+	SimNet       bool
+	RPCUser      string
+	RPCPassword  string
+	RPCCert      string
+	Proxy        string
+	ProxyUser    string
+	ProxyPass    string
+	AuthType     string
+	ClientCert   string
+	ClientKey    string
 }
 
-// normalizeAddress returns addr with the passed default port appended if
-// there is not already a port specified.
-func normalizeAddress(addr string, useTestNet, useSimNet, useWallet bool) string {
-	_, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		var defaultPort string
-		switch {
-		case useTestNet:
-			if useWallet {
-				defaultPort = "19110"
-			} else {
-				defaultPort = "19109"
-			}
-		case useSimNet:
-			if useWallet {
-				defaultPort = "19557"
-			} else {
-				defaultPort = "19556"
-			}
-		default:
-			if useWallet {
-				defaultPort = "9110"
-			} else {
-				defaultPort = "9109"
-			}
-		}
+func usage() {
+	fmt.Fprintf(os.Stderr, `Usage of dcrctl:
+  dcrctl [flags] command <args...>
 
-		return net.JoinHostPort(addr, defaultPort)
-	}
-	return addr
+Flags:
+  -C value
+        config file
+  -V    show version and exit
+  -l    list commands and exit
+  -s string
+        Websocket server URL (default "wss://localhost/ws")
+  -wallet
+        default to dcrwallet ports
+  -simnet
+        default to simnet ports
+  -testnet
+        default to testnet ports
+  -authtype string (default "basic")
+        authentication method (one of: "basic" "clientcert")
+  -u/-rpcuser string
+        RPC user
+  -P/-rpcpass string
+        RPC password
+  -clientcert string
+        certificate file for clientcert authentication
+  -clientkey string
+        key file for clientcert authentication
+  -c/-rpccert string
+        filepath to Certificate Authority; uses global cert store when empty
+  -proxy string
+        SOCKS5 proxy
+  -proxypass string
+        SOCKS5 proxy password
+  -proxyuser string
+        SOCKS5 proxy username
+`)
+	os.Exit(2)
+}
+
+func (c *config) FlagSet() *flag.FlagSet {
+	fs := flag.NewFlagSet("dcrctl", flag.ExitOnError)
+	configParser := flagfile.Parser{AllowUnknown: true}
+	c.Config = configParser.ConfigFlag(fs)
+	fs.Var(c.Config, "C", "config file")
+	fs.BoolVar(&c.ShowVersion, "V", false, "")
+	fs.BoolVar(&c.ListCommands, "l", false, "")
+	fs.StringVar(&c.RPCServer, "s", "wss://localhost/ws", "")
+	fs.BoolVar(&c.TestNet, "testnet", false, "")
+	fs.BoolVar(&c.SimNet, "simnet", false, "")
+	fs.BoolVar(&c.Wallet, "wallet", false, "")
+	fs.StringVar(&c.RPCUser, "u", "", "")
+	fs.StringVar(&c.RPCUser, "rpcuser", "", "")
+	fs.StringVar(&c.RPCPassword, "P", "", "")
+	fs.StringVar(&c.RPCPassword, "rpcpass", "", "")
+	fs.StringVar(&c.RPCCert, "c", "", "")
+	fs.StringVar(&c.RPCCert, "rpccert", "", "")
+	fs.StringVar(&c.Proxy, "proxy", "", "")
+	fs.StringVar(&c.ProxyUser, "proxyuser", "", "")
+	fs.StringVar(&c.ProxyPass, "proxypass", "", "")
+	fs.StringVar(&c.AuthType, "authtype", "", "")
+	fs.StringVar(&c.ClientCert, "clientcert", "", "")
+	fs.StringVar(&c.ClientKey, "clientkey", "", "")
+	fs.Usage = usage
+	return fs
 }
 
 // cleanAndExpandPath expands environment variables and leading ~ in the
@@ -248,46 +275,43 @@ func fileExists(name string) bool {
 // command line options.  Command line options always take precedence.
 func loadConfig() (*config, []string, error) {
 	// Default config.
-	cfg := config{
-		ConfigFile:      defaultConfigFile,
-		RPCServer:       defaultRPCServer,
-		RPCCert:         defaultRPCCertFile,
-		WalletRPCServer: defaultWalletRPCServer,
+	cfg := &config{
+		RPCServer: defaultRPCServer,
 	}
+	fs := cfg.FlagSet()
+	args := os.Args[1:]
 
-	// Pre-parse the command line options to see if an alternative config
-	// file, the version flag, or the list commands flag was specified.  Any
-	// errors aside from the help message error can be ignored here since
-	// they will be caught by the final parse below.
-	preCfg := cfg
-	preParser := flags.NewParser(&preCfg, flags.HelpFlag)
-	_, err := preParser.Parse()
-	if err != nil {
-		var e *flags.Error
-		if errors.As(err, &e) {
-			if e.Type != flags.ErrHelp {
-				fmt.Fprintln(os.Stderr, err)
-				fmt.Fprintln(os.Stderr, "")
-				fmt.Fprintln(os.Stderr, "The special parameter `-` "+
-					"indicates that a parameter should be read "+
-					"from the\nnext unread line from standard input.")
-				os.Exit(1)
-			} else if e.Type == flags.ErrHelp {
-				fmt.Fprintln(os.Stdout, err)
-				fmt.Fprintln(os.Stdout, "")
-				fmt.Fprintln(os.Stdout, "The special parameter `-` "+
-					"indicates that a parameter should be read "+
-					"from the\nnext unread line from standard input.")
-				os.Exit(0)
-			}
+	// Determine config file to read (if any).  When -C is the first
+	// parameter, configure flags from the specified config file rather than
+	// using the application default path.  Otherwise the default config
+	// will be parsed if the file exists.
+	//
+	// If further -C options are specified in later arguments, the config
+	// file parameter is used to modify the current state of the config.
+	//
+	// If you want to read the application default config first, and other
+	// configs later, explicitly specify the default path with the first
+	// flag argument.
+	var configPath string
+	if len(args) >= 2 && args[0] == "-C" {
+		configPath = args[1]
+		args = args[2:]
+	} else if fileExists(defaultConfigFile) {
+		configPath = defaultConfigFile
+	}
+	if configPath != "" {
+		err := cfg.Config.Set(configPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
 		}
 	}
+	fs.Parse(args)
 
 	// Show the version and exit if the version flag was specified.
 	appName := filepath.Base(os.Args[0])
 	appName = strings.TrimSuffix(appName, filepath.Ext(appName))
-	usageMessage := fmt.Sprintf("Use %s -h to show options", appName)
-	if preCfg.ShowVersion {
+	if cfg.ShowVersion {
 		fmt.Printf("%s version %s (Go version %s %s/%s)\n", appName,
 			versionString(), runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		os.Exit(0)
@@ -295,39 +319,9 @@ func loadConfig() (*config, []string, error) {
 
 	// Show the available commands and exit if the associated flag was
 	// specified.
-	if preCfg.ListCommands {
+	if cfg.ListCommands {
 		listCommands()
 		os.Exit(0)
-	}
-
-	if !fileExists(preCfg.ConfigFile) {
-		err := createDefaultConfigFile(preCfg.ConfigFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating a default config file: %v\n", err)
-		}
-	}
-
-	// Load additional config from file.
-	parser := flags.NewParser(&cfg, flags.Default)
-	err = flags.NewIniParser(parser).ParseFile(preCfg.ConfigFile)
-	if err != nil {
-		var perr *os.PathError
-		if !errors.As(err, &perr) {
-			fmt.Fprintf(os.Stderr, "Error parsing config file: %v\n",
-				err)
-			fmt.Fprintln(os.Stderr, usageMessage)
-			return nil, nil, err
-		}
-	}
-
-	// Parse command line options again to ensure they take precedence.
-	remainingArgs, err := parser.Parse()
-	if err != nil {
-		var e *flags.Error
-		if !errors.As(err, &e) || e.Type != flags.ErrHelp {
-			fmt.Fprintln(os.Stderr, usageMessage)
-		}
-		return nil, nil, err
 	}
 
 	// Multiple networks can't be selected simultaneously.
@@ -346,18 +340,13 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
-	// The auth type that uses client certifications requires TLS.
-	if cfg.NoTLS && cfg.AuthType == authTypeClientCert {
-		str := "%s: the %q authorization type requires TLS"
-		err := fmt.Errorf(str, "loadConfig", authTypeClientCert)
-		fmt.Fprintln(os.Stderr, err)
-		return nil, nil, err
-	}
-
 	// Override the RPC certificate if the --wallet flag was specified and
 	// the user did not specify one.
-	if cfg.Wallet && cfg.RPCCert == defaultRPCCertFile {
+	switch {
+	case cfg.Wallet && cfg.RPCCert == "" && fileExists(defaultWalletCertFile):
 		cfg.RPCCert = defaultWalletCertFile
+	case cfg.RPCCert == "" && fileExists(defaultRPCCertFile):
+		cfg.RPCCert = defaultRPCCertFile
 	}
 
 	// Set path for the client key/cert for the clientcert authorization type
@@ -374,83 +363,46 @@ func loadConfig() (*config, []string, error) {
 		cfg.ClientKey = cleanAndExpandPath(cfg.ClientKey)
 	}
 
-	// When the --wallet flag is specified, use the walletrpcserver port
-	// if specified.
-	if cfg.Wallet && cfg.WalletRPCServer != defaultWalletRPCServer {
-		cfg.RPCServer = cfg.WalletRPCServer
-	}
-
 	// Handle environment variable expansion in the RPC certificate path.
 	cfg.RPCCert = cleanAndExpandPath(cfg.RPCCert)
 
 	// Add default port to RPC server based on --testnet and --wallet flags
 	// if needed.
-	cfg.RPCServer = normalizeAddress(cfg.RPCServer, cfg.TestNet,
-		cfg.SimNet, cfg.Wallet)
+	server, err := normalizeServer(cfg)
+	if err != nil {
+		println(err.Error())
+		return nil, nil, err
+	}
+	cfg.RPCServer = server
 
-	return &cfg, remainingArgs, nil
+	return cfg, fs.Args(), nil
 }
 
-// createDefaultConfig creates a basic config file at the given destination path.
-// For this it tries to read the dcrd config file at its default path, and extract
-// the RPC user and password from it.
-func createDefaultConfigFile(destinationPath string) error {
-	// Nothing to do when there is no existing dcrd conf file at the default
-	// path to extract the details from.
-	dcrdConfigPath := filepath.Join(dcrdHomeDir, "dcrd.conf")
-	if !fileExists(dcrdConfigPath) {
-		return nil
-	}
-
-	// Read dcrd.conf from its default path
-	dcrdConfigFile, err := os.Open(dcrdConfigPath)
+func normalizeServer(cfg *config) (string, error) {
+	s := cfg.RPCServer
+	parsed, err := url.Parse(s)
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer dcrdConfigFile.Close()
-	content, err := ioutil.ReadAll(dcrdConfigFile)
+	_, _, err = net.SplitHostPort(parsed.Host)
 	if err != nil {
-		return err
+		port := defaultPort(cfg)
+		parsed.Host = net.JoinHostPort(parsed.Host, port)
 	}
+	return parsed.String(), nil
+}
 
-	// Extract the rpcuser
-	rpcUserRegexp, err := regexp.Compile(`(?m)^\s*rpcuser=([^\s]+)`)
-	if err != nil {
-		return err
+func defaultPort(cfg *config) string {
+	port := "9109"
+	switch {
+	case cfg.Wallet && cfg.TestNet:
+		port = "19110"
+	case cfg.Wallet && cfg.SimNet:
+		port = "19557"
+	case cfg.TestNet:
+		port = "19109"
+	case cfg.SimNet:
+		port = "19556"
 	}
-	userSubmatches := rpcUserRegexp.FindSubmatch(content)
-	if userSubmatches == nil {
-		// No user found, nothing to do
-		return nil
-	}
-
-	// Extract the rpcpass
-	rpcPassRegexp, err := regexp.Compile(`(?m)^\s*rpcpass=([^\s]+)`)
-	if err != nil {
-		return err
-	}
-	passSubmatches := rpcPassRegexp.FindSubmatch(content)
-	if passSubmatches == nil {
-		// No password found, nothing to do
-		return nil
-	}
-
-	// Create the destination directory if it does not exists
-	err = os.MkdirAll(filepath.Dir(destinationPath), 0700)
-	if err != nil {
-		return err
-	}
-
-	// Create the destination file and write the rpcuser and rpcpass to it
-	dest, err := os.OpenFile(destinationPath,
-		os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
-	defer dest.Close()
-
-	dest.WriteString(fmt.Sprintf("rpcuser=%s\nrpcpass=%s",
-		string(userSubmatches[1]), string(passSubmatches[1])))
-
-	return nil
+	return port
 }
