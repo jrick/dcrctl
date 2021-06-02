@@ -10,3 +10,5 @@ require (
 	github.com/decred/go-socks v1.1.0
 	github.com/jessevdk/go-flags v1.4.1-0.20200711081900-c17162fe8fd7
 )
+
+replace decred.org/dcrwallet => github.com/jrick/dcrwallet v1.2.3-0.20210602203746-896cd07d3c1c
